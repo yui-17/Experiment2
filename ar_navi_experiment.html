@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>AR避難ナビ 実験版</title>
+<style>
+:root { --guide:#FFD700; --g:255,215,0; --poly:polygon(50% 0,100% 100%,50% 72%,0 100%); }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; color:#fff; font-family:'Helvetica Neue',sans-serif;
+       height:100vh; width:100vw; overflow:hidden; }
+
+/* 横向き指示 */
+#rotate-screen {
+  position:fixed; inset:0; background:#111; z-index:2000;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:20px; text-align:center;
+}
+#rotate-screen.hidden { display:none; }
+.ri { font-size:64px; margin-bottom:20px; animation:sw 1.5s ease-in-out infinite; }
+@keyframes sw { 0%,100%{transform:rotate(-30deg)} 50%{transform:rotate(30deg)} }
+
+/* スキップボタン */
+#skip-rotate-btn {
+  margin-top:20px; padding:10px 22px; font-size:14px;
+  background:rgba(255,255,255,0.15); color:#fff;
+  border:1px solid rgba(255,255,255,0.4); border-radius:20px; cursor:pointer;
+}
+
+/* 権限画面 */
+#perm-screen {
+  position:fixed; inset:0; background:#111; z-index:1800;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:24px; text-align:center;
+}
+#perm-screen.hidden { display:none; }
+.sbtn {
+  margin-top:24px; padding:16px 44px; font-size:18px; font-weight:bold;
+  background:#FFD700; color:#000; border:none; border-radius:12px; cursor:pointer;
+}
+
+/* ── z-index 設計 ──────────────────────
+  5  : AR canvas（障害物描画）
+  50 : Rain canvas（雨・霧・全画面、マップのみ除外）
+  60 : 上部ナビバー・右下矢印（雨の上に出る）
+  100: 左下マップパネル（雨の上に出る）
+─────────────────────────────────────── */
+
+/* 全画面 AR キャンバス */
+#ar-canvas   { position:fixed; inset:0; z-index:5; }
+/* 全画面 豪雨キャンバス */
+#rain-canvas { position:fixed; inset:0; z-index:50; pointer-events:none; }
+
+/* ── 上部ナビバー（z=60 雨の上）── */
+#top-bar {
+  position:fixed; top:var(--bar-top,10vh); left:0; right:0; z-index:60;
+  background:rgba(0,0,0,0.30);
+  border-bottom:1px solid rgba(255,255,255,0.12);
+}
+#top-row1 {
+  display:flex; align-items:center; padding:8px 14px; gap:10px; height:58px;
+}
+/* 小型矢印 */
+#nav-arrow-outer {
+  width:36px; height:36px; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  filter:drop-shadow(0 0 3px rgba(var(--g),0.45));
+}
+#nav-arrow-outer:has(.avoid) { filter:drop-shadow(0 0 3px rgba(255,100,0,0.55)); }
+#nav-arrow-small {
+  width:22px; height:28px; background:var(--guide); clip-path:var(--poly);
+  transition:transform .25s ease-out, background-color .3s;
+  transform-origin:center 65%;
+}
+#nav-arrow-small.avoid { background:#FF6600; }
+#nav-msg {
+  flex:1; font-size:15px; font-weight:bold;
+  white-space:nowrap; overflow:hidden;
+  text-shadow:0 0 8px rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,1);
+}
+.msg-safe  { color:#5FE080; }
+.msg-avoid { color:#FF6600; }
+.msg-wait  { color:rgba(255,255,255,0.5); }
+#nav-right { text-align:right; flex-shrink:0; }
+#nav-dist-top {
+  font-size:24px; font-weight:900; color:#FFF3B0; line-height:1;
+  text-shadow:0 1px 2px #000, 0 0 5px #000, 0 0 5px #000;
+}
+#nav-dist-lbl { font-size:10px; color:rgba(255,255,255,0.85); text-shadow:0 1px 2px rgba(0,0,0,0.9); }
+
+/* 障害物警告行 */
+#top-row2 {
+  display:flex; align-items:center; padding:4px 14px 7px; gap:10px;
+  border-top:1px solid rgba(255,100,0,0.3);
+  background:rgba(50,10,0,0.30);
+}
+#top-row2.hidden { display:none; }
+#obs-warn-badge {
+  font-size:11px; font-weight:bold; padding:2px 8px;
+  border-radius:4px; background:rgba(255,60,0,0.85); white-space:nowrap;
+}
+#obs-warn-dist {
+  font-size:20px; font-weight:900; color:#FF8A3D; min-width:64px;
+  text-shadow:0 1px 3px rgba(0,0,0,0.9);
+}
+#obs-warn-bar-wrap { flex:1; }
+#obs-warn-bar-label { font-size:9px; color:rgba(255,255,255,0.85); margin-bottom:2px; text-shadow:0 1px 2px rgba(0,0,0,0.9); }
+#obs-warn-bar-track { height:5px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden; }
+#obs-warn-bar-fill  { height:100%; border-radius:3px; transition:width .4s, background .3s; }
+#obs-warn-dir { font-size:11px; color:rgba(255,225,195,0.95); white-space:nowrap; text-shadow:0 1px 2px rgba(0,0,0,0.9); }
+
+/* ── 左下：マップ（正方形・z=100）── */
+#panel-map {
+  position:fixed; bottom:0; left:0; z-index:100;
+  height:42vh; width:42vh;
+  background:rgba(0,14,0,0.92);
+  border-top:1px solid rgba(100,200,100,0.3);
+  border-right:1px solid rgba(100,200,100,0.15);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:6px;
+}
+.plbl { font-size:9px; color:rgba(255,255,255,0.25); letter-spacing:1px; margin-bottom:4px; }
+#minimap { width:100%; height:100%; max-width:100%; max-height:calc(100% - 20px); border-radius:6px; }
+#map-scale { font-size:8px; color:rgba(255,255,255,0.2); margin-top:3px; }
+
+/* ── 右下：矢印のみ（z=60 雨の上）── */
+#panel-goal {
+  position:fixed; bottom:24px; right:24px; z-index:60;
+  display:flex; flex-direction:column; align-items:center;
+}
+#arrow-wrap {
+  width:86px; height:110px;
+  display:flex; align-items:center; justify-content:center;
+  filter:drop-shadow(0 0 7px rgba(var(--g),0.45));
+}
+#arrow-wrap:has(.avoid) { filter:drop-shadow(0 0 7px rgba(255,100,0,0.55)); }
+#arrow {
+  width:80px; height:100px; background:var(--guide); clip-path:var(--poly);
+  transition:transform .25s ease-out, background-color .3s;
+  transform-origin:center 65%;
+}
+#arrow.avoid { background:#FF6600; }
+
+/* 送信情報（右下隅） */
+#send-info {
+  position:fixed; bottom:6px; right:8px; z-index:60;
+  font-size:10px; color:rgba(255,255,255,0.5);
+  background:rgba(0,0,0,0.5); padding:2px 6px; border-radius:4px;
+}
+
+/* 視界ラベル */
+#visibility-note {
+  position:fixed; bottom:4px; left:43vh; z-index:60;
+  font-size:9px; color:rgba(180,210,255,0.3); letter-spacing:1px; pointer-events:none;
+}
+
+/* ===== 実験版で追加 ===== */
+#ground-canvas { position:fixed; inset:0; z-index:55; pointer-events:none; }
+body[data-phase="idle"] #ground-canvas, body[data-phase="idle"] #avoid-hud, body[data-phase="idle"] #map-zoom { visibility:hidden; }
+#avoid-hud { position:fixed; left:50%; bottom:10px; transform:translateX(-50%); z-index:60; min-width:220px; padding:6px 14px 8px;
+  background:rgba(0,0,0,0.72); border:1px solid rgba(255,102,0,0.7); border-radius:10px; text-align:center; display:none; pointer-events:none; }
+#avoid-hud.show { display:block; }
+#avoid-hud.clear { border-color:rgba(95,224,128,0.8); }
+#avoid-hud-text { font-size:22px; font-weight:900; color:#FF8A3D; white-space:nowrap; }
+#avoid-hud.clear #avoid-hud-text { color:#5FE080; }
+#avoid-hud-track { height:6px; margin-top:4px; background:rgba(255,255,255,0.15); border-radius:3px; overflow:hidden; }
+#avoid-hud-fill { height:100%; width:0; background:#FF8A3D; border-radius:3px; }
+#avoid-hud.clear #avoid-hud-fill { background:#5FE080; }
+#map-zoom { position:fixed; left:calc(42vh - 44px); bottom:calc(42vh - 84px); z-index:1250; display:flex; flex-direction:column; gap:6px; }
+#map-zoom button { width:38px; height:38px; font-size:22px; color:#fff; background:rgba(40,60,40,0.9); border:1px solid rgba(160,220,160,0.6); border-radius:8px; touch-action:manipulation; }
+#send-info, #map-scale { visibility:hidden; } /* 確認用の文字は実験者パネルへ移動 */
+body, #exp-panel { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+body[data-phase="idle"] #ar-canvas, body[data-phase="idle"] #rain-canvas,
+body[data-phase="idle"] #top-bar, body[data-phase="idle"] #panel-map,
+body[data-phase="idle"] #panel-goal, body[data-phase="idle"] #visibility-note { visibility:hidden; }
+#exp-panel {
+  position:fixed; top:0; right:0; bottom:0; width:min(460px,100vw); z-index:1500;
+  background:rgba(12,14,18,0.96); color:#eee; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  padding:12px 16px 24px; font-size:14px; line-height:1.5; border-left:1px solid #444;
+}
+#exp-panel.hidden { display:none; }
+#exp-panel h2 { font-size:16px; margin-bottom:8px; }
+#exp-panel .row { display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap:wrap; }
+#exp-panel .muted { color:#aaa; font-size:12px; }
+#exp-panel select, #exp-panel input[type=number], #exp-panel input[type=text] {
+  font-size:16px; padding:6px 8px; background:#222; color:#fff; border:1px solid #666; border-radius:6px;
+}
+#exp-panel input[type=number] { width:80px; }
+#exp-panel input[type=text] { width:100%; -webkit-user-select:text; user-select:text; }
+#exp-panel input[type=range] { flex:1; min-width:150px; }
+#exp-panel button {
+  font-size:15px; padding:10px 14px; background:#333; color:#fff;
+  border:1px solid #777; border-radius:8px; cursor:pointer; touch-action:manipulation;
+}
+#exp-panel button.primary { background:#2F6FED; border-color:#2F6FED; font-weight:bold; }
+#exp-panel button.on { background:#2F6FED; border-color:#2F6FED; }
+#exp-panel .warn { color:#FFB454; }
+#tap-layer { position:fixed; inset:0; z-index:1200; display:none; background:transparent; touch-action:manipulation; }
+body[data-phase="discover"] #tap-layer { display:block; }
+#corner { position:fixed; top:0; left:0; width:90px; height:90px; z-index:1300; display:none; touch-action:none; }
+body[data-phase="discover"] #corner, body[data-phase="walk"] #corner, body[data-phase="free"] #corner { display:block; }
+#toast { position:fixed; top:6px; left:50%; transform:translateX(-50%); z-index:1400; font-size:12px;
+  padding:3px 10px; border-radius:10px; background:rgba(0,0,0,.75); color:#fff; display:none; }
+</style>
+<style id="cond-style"></style>
+</head>
+<body data-phase="idle">
+
+<!-- 横向き指示 -->
+<div id="rotate-screen">
+  <div class="ri">📱</div>
+  <div style="font-size:22px;font-weight:bold;margin-bottom:12px;">スマートフォンを横向きに</div>
+  <div style="font-size:13px;color:rgba(255,255,255,0.6);line-height:1.8;">
+    左右どちら向きでもOKです<br>横向きになると自動で次の画面に進みます
+  </div>
+</div>
+
+<!-- 権限画面 -->
+<div id="perm-screen" class="hidden">
+  <div style="font-size:20px;font-weight:bold;margin-bottom:6px;">⛈️ AR避難ナビ</div>
+  <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-bottom:18px;">豪雨シミュレーション</div>
+  <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:2.4;">
+    📍 位置情報（GPS）<br>🧭 コンパス（方向センサー）
+  </div>
+  <button class="sbtn" id="start-btn">許可して開始 ▶</button>
+  <div style="margin-top:12px;font-size:10px;color:rgba(255,255,255,0.2);">iOSはSafariで開いてください</div>
+</div>
+
+<!-- z=5：AR障害物キャンバス -->
+<canvas id="ar-canvas"></canvas>
+<!-- z=50：豪雨キャンバス -->
+<canvas id="rain-canvas"></canvas>
+<!-- z=55：地面の矢印・回避範囲の輪 -->
+<canvas id="ground-canvas"></canvas>
+
+<!-- z=60：上部ナビバー -->
+<div id="top-bar">
+  <div id="top-row1">
+    <div id="nav-arrow-outer"><div id="nav-arrow-small"></div></div>
+    <div id="nav-msg" class="msg-wait">📡 GPS取得中...</div>
+    <div id="nav-right">
+      <div id="nav-dist-top">--</div>
+      <div id="nav-dist-lbl">目的地まで(m)</div>
+    </div>
+  </div>
+  <div id="top-row2" class="hidden">
+    <div id="obs-warn-badge">障害物</div>
+    <div id="obs-warn-dist">-- m</div>
+    <div id="obs-warn-bar-wrap">
+      <div id="obs-warn-bar-label">障害物まで</div>
+      <div id="obs-warn-bar-track"><div id="obs-warn-bar-fill" style="width:0;background:#FFCC00;"></div></div>
+    </div>
+    <div id="obs-warn-dir">方向: --</div>
+  </div>
+</div>
+
+<!-- z=100：左下マップ -->
+<div id="panel-map">
+  <div class="plbl">全体マップ（北↑）</div>
+  <canvas id="minimap" width="600" height="600"></canvas>
+  <div id="map-scale"></div>
+</div>
+
+<!-- z=60：右下矢印のみ -->
+<div id="panel-goal">
+  <div id="arrow-wrap"><div id="arrow"></div></div>
+</div>
+
+<div id="send-info">送信: 待機中</div>
+<div id="visibility-note">👁 視界約5m シミュレーション</div>
+<div id="avoid-hud"><div id="avoid-hud-text"></div><div id="avoid-hud-track"><div id="avoid-hud-fill"></div></div></div>
+<div id="map-zoom"><button id="map-plus" aria-label="マップ拡大">＋</button><button id="map-minus" aria-label="マップ縮小">－</button></div>
+<div id="tap-layer"></div>
+<div id="corner"></div>
+<div id="toast"></div>
+<div id="exp-panel" class="hidden"></div>
+
+<script type="module">
+
+const firebaseConfig = {
+  apiKey:"AIzaSyBG-JwC9VKwnSHaSkvGLzNLvXtvZ3U0q6M",
+  authDomain:"heavy-rain-evacuation.firebaseapp.com",
+  projectId:"heavy-rain-evacuation",
+  storageBucket:"heavy-rain-evacuation.firebasestorage.app",
+  appId:"1:405482442865:web:99c4a046167821b4abcbd0"
+};
+let db=null, doc=null, setDoc=null, serverTimestamp=null, dbError='';
+(async()=>{
+  try{
+    const a=await import("https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js");
+    const f=await import("https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js");
+    db=f.getFirestore(a.initializeApp(firebaseConfig));
+    doc=f.doc; setDoc=f.setDoc; serverTimestamp=f.serverTimestamp;
+  }catch(e){ dbError='Firebase読込失敗'; console.error(e); }
+})();
+
+/* ===== 実験の設定（ここを変えるとデザインの組み合わせが変わる） =====
+   URLの ?conds=base,red,green でも指定できる。5条件なら順序は10通りになる。 */
+const DEFAULT_CONDS=['base','red','green','white','bigarrow','triangle'];
+
+const color=(hex,rgb)=>`:root{--guide:${hex};--g:${rgb};}`;
+const shape=(poly)=>`:root{--poly:polygon(${poly});}`;
+const CONDITIONS={
+  base:{label:'基準（黄・➤型）',css:''},
+  red:{label:'赤',guide:'#FF4D4D',css:color('#FF4D4D','255,77,77')},
+  green:{label:'蛍光緑',guide:'#39FF14',css:color('#39FF14','57,255,20')},
+  white:{label:'白',guide:'#F2F2F2',css:color('#F2F2F2','242,242,242')},
+  bigarrow:{label:'大きな矢印',css:`#arrow-wrap{width:129px;height:165px;}
+#arrow{width:120px;height:150px;}`},
+  fontsize:{label:'大きな案内文',css:`#nav-msg{font-size:22px;}`},
+  layout:{label:'配置変更',css:`#top-bar{display:flex;align-items:center;padding:8px 14px;gap:10px;height:58px;}
+#top-row1{display:contents;padding:0;height:auto;gap:normal;}
+#nav-msg{order:2;min-width:0;}
+#top-row2{order:3;display:flex;align-items:center;padding:4px 10px;gap:10px;flex:0 1 auto;min-width:0;border:1px solid rgba(255,100,0,0.3);border-radius:6px;}
+#nav-right{order:4;}
+#obs-warn-bar-wrap{flex:1;min-width:80px;overflow:hidden;}
+#obs-warn-bar-label{font-size:9px;color:rgba(255,255,255,0.3);margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#panel-goal{top:50%;bottom:auto;right:24px;transform:translateY(-50%);}`},
+  shaftarrow:{label:'→型',css:shape('50% 0,100% 45%,71% 45%,71% 100%,29% 100%,29% 45%,0 45%')},
+  triangle:{label:'三角型（旧基準）',css:shape('50% 0,100% 100%,0 100%')},
+};
+const store={
+  get(k,d){try{const v=localStorage.getItem(k);return v===null?d:JSON.parse(v);}catch(e){return d;}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+};
+const params=new URLSearchParams(location.search);
+const expConds=(()=>{
+  const q=(params.get('conds')||'').split(',').filter(c=>CONDITIONS[c]);
+  return (q.length>=2&&new Set(q).size===q.length)?q:DEFAULT_CONDS;
+})();
+
+/* Williams型の順序：各条件が各順番に同数、直前の条件も均等になる。
+   条件数が奇数のときは逆順も加えて 2n 通りにする。 */
+function williams(n){
+  const first=[0];
+  for(let lo=1,hi=n-1;lo<=hi;){ first.push(lo++); if(lo<=hi) first.push(hi--); }
+  const rows=[];
+  for(let i=0;i<n;i++) rows.push(first.map(x=>(x+i)%n));
+  if(n%2) rows.slice().forEach(r=>rows.push(r.slice().reverse()));
+  return rows;
+}
+const ORDERS=williams(expConds.length);
+
+function setCondition(id){
+  document.getElementById('cond-style').textContent=CONDITIONS[id].css;
+  exp.cond=id;
+}
+const exp={
+  phase:'idle',cond:'base',pid:null,group:'S',num:1,pattern:0,order:[],trial:0,rec:null,
+  fog:Math.max(0,Math.min(100,Number(params.get('fog')??store.get('exp2_fog',100)))),
+  groundMode:(params.get('ground')||store.get('exp2_ground','line'))==='triangle'?'triangle':'line',
+  barTop:Math.max(0,Math.min(25,Number(params.get('bar')??store.get('exp2_bar3',10)))),
+  gpsMode:(params.get('gps')||store.get('exp2_gps','predict'))==='raw'?'raw':'predict',
+};
+function setPhase(p){exp.phase=p;document.body.dataset.phase=p;}
+const fogK=()=>exp.fog/100;
+let mapZoom=1;
+const applyBar=()=>document.documentElement.style.setProperty('--bar-top',exp.barTop+'vh');
+
+// ★ 実験設定
+let GOAL={lat:36.1085084,lng:139.3630287,name:"ゴール地点★"};
+let OBSTACLES=[
+  {lat:36.1094372,lng:139.3648114,radiusM:3.0,name:"障害物",widthM:1.0,depthM:1.0,heightM:1.0,rotationDeg:0},
+];
+const AREA=[[36.110889,139.360278],[36.110306,139.367194],[36.105889,139.365111],[36.106222,139.357861]];
+
+// ★ 豪雨・視界設定
+const RAIN={drops:280,speed:18,angle:20,fogOpa:0.17,visM:5.0};
+const OBS_SHOW=15.0;
+const AR_FOV=46;
+
+let myLat=null,myLng=null,deviceHeading=0,animFrame=0;
+
+/* ===== 固定ルート =====
+   現地で登録した地点を結んだ線を案内する（広場は地図の歩道データでは赤線どおりに案内できない）。
+   優先順位：URLの ?route=緯度,経度;緯度,経度...&obs=緯度,経度 → 端末内の保存 */
+const parsePts=t=>(t||'').split(';').map(p=>p.split(',').map(Number)).filter(p=>p.length===2&&p.every(Number.isFinite));
+// 実験ルート（順方向の順。逆方向はこの逆順）
+// 36°06'29.7"N 139°21'47.2"E → 36°06'29.7"N 139°21'48.0"E → 36°06'30.1"N 139°21'48.0"E → 36°06'30.0"N 139°21'49.1"E
+const dms=(d,m,s)=>+(d+m/60+s/3600).toFixed(7);
+const BUILTIN_ROUTE=[
+  [dms(36,6,29.7),dms(139,21,47.2)],
+  [dms(36,6,29.7),dms(139,21,48.0)],
+  [dms(36,6,30.1),dms(139,21,48.0)],
+  [dms(36,6,30.0),dms(139,21,49.1)],
+];
+const routeCfg=(()=>{
+  const q=parsePts(params.get('route'));
+  if(q.length>=2){const o=parsePts(params.get('obs'));return {points:q,obs:o[0]||null};}
+  const s=store.get('exp2_routecfg2',null);
+  return (s&&Array.isArray(s.points))?{points:s.points,obs:s.obs||null}:{points:BUILTIN_ROUTE.map(p=>[...p]),obs:null};
+})();
+function saveRouteCfg(){store.set('exp2_routecfg2',routeCfg);}
+const altDirection=params.get('alt')!=='0';
+// 奇数番目は順向き、偶数番目は逆向き（?alt=0 で常に順向き）
+const trialReverse=i=>altDirection&&i%2===1;
+
+let routeCoords=[];        // 1mごとの点 [[緯度,経度],...]
+let routeDistanceM=0;
+let progressIdx=-1, obsIdx=0;
+
+function legM(a,b){const k=Math.cos(a[0]*Math.PI/180);return Math.hypot((b[0]-a[0])*111320,(b[1]-a[1])*111320*k);}
+function routeLength(P){let d=0;for(let i=1;i<P.length;i++)d+=legM(P[i-1],P[i]);return d;}
+function obstaclePoint(){
+  if(routeCfg.obs)return routeCfg.obs;
+  const P=routeCfg.points;if(P.length<2)return null;
+  let best=1,m=-1;for(let i=1;i<P.length;i++){const d=legM(P[i-1],P[i]);if(d>m){m=d;best=i;}}
+  return [(P[best-1][0]+P[best][0])/2,(P[best-1][1]+P[best][1])/2];
+}
+function applyRoute(reverse){
+  const P=reverse?[...routeCfg.points].reverse():routeCfg.points;
+  progressIdx=-1;
+  if(P.length<2){routeCoords=[];routeDistanceM=0;return;}
+  const out=[P[0]];
+  for(let i=1;i<P.length;i++){
+    const n=Math.max(1,Math.round(legM(P[i-1],P[i])));
+    for(let k=1;k<=n;k++)out.push([P[i-1][0]+(P[i][0]-P[i-1][0])*k/n,P[i-1][1]+(P[i][1]-P[i-1][1])*k/n]);
+  }
+  routeCoords=out;routeDistanceM=routeLength(P);
+  const g=P[P.length-1];GOAL={lat:g[0],lng:g[1],name:'ゴール地点★'};
+  const o=obstaclePoint();OBSTACLES[0].lat=o[0];OBSTACLES[0].lng=o[1];
+  let bd=Infinity;out.forEach((q,i)=>{const d=legM(q,o);if(d<bd){bd=d;obsIdx=i;}});
+}
+function routeLink(){
+  const f=p=>p.join(',');
+  let u=location.origin+location.pathname+'?route='+routeCfg.points.map(f).join(';');
+  if(routeCfg.obs)u+='&obs='+f(routeCfg.obs);
+  return u;
+}
+applyRoute(false);
+
+/* ===== ルート上の現在位置・次の進行方向 =====
+   GPSのぶれで先の区間へ飛ばないよう、前回の位置の近くだけを探す */
+function getRouteProgress(){
+  if(routeCoords.length<2||myLat===null)return null;
+  const near=(from,to)=>{
+    let bi=from,bd=Infinity;
+    for(let i=from;i<=to;i++){const d=dist(myLat,myLng,routeCoords[i][0],routeCoords[i][1]);if(d<bd){bd=d;bi=i;}}
+    return [bi,bd];
+  };
+  const last=routeCoords.length-1;
+  let [idx,d]=progressIdx<0?near(0,last)
+    :near(Math.max(0,progressIdx-3),Math.min(last,progressIdx+12));
+  if(d>15)[idx,d]=near(0,last);   // 大きく外れたら全体から探し直す
+  progressIdx=idx;
+  const target=routeCoords[Math.min(last,Math.max(idx+1,idx+5))];  // 5m先を目標にする
+  return {
+    remaining:(routeCoords.length-1-idx)*(routeDistanceM/last)+d,
+    bearing:bear(myLat,myLng,target[0],target[1]),
+    tangent:bear(routeCoords[Math.min(idx,last-1)][0],routeCoords[Math.min(idx,last-1)][1],target[0],target[1])
+  };
+}
+
+let deviceId=(()=>{let id=localStorage.getItem('dv');if(!id){id='u'+Math.random().toString(36).slice(2,9);localStorage.setItem('dv',id);}return id;})();
+
+const arC=document.getElementById('ar-canvas');    const arX=arC.getContext('2d');
+const rainC=document.getElementById('rain-canvas'); const rainX=rainC.getContext('2d');
+const groundC=document.getElementById('ground-canvas'); const gX=groundC.getContext('2d');
+const mapC=document.getElementById('minimap');      const mapX=mapC.getContext('2d');
+
+// ===== 雨粒 =====
+class Drop {
+  constructor(W,H,init=false){this.W=W;this.H=H;this.reset(init);}
+  reset(init=false){
+    this.x=Math.random()*(this.W+200)-100;
+    this.y=init?Math.random()*this.H:-60;
+    this.len=15+Math.random()*25; this.spd=RAIN.speed*(0.7+Math.random()*0.6);
+    this.opa=0.35+Math.random()*0.45; this.w=0.5+Math.random()*1.2;
+    if(Math.random()<0.3){this.len*=0.5;this.w*=0.6;this.opa*=0.5;}
+  }
+  update(){const r=RAIN.angle*Math.PI/180;this.x+=Math.sin(r)*this.spd;this.y+=Math.cos(r)*this.spd;if(this.y>this.H+60||this.x>this.W+100)this.reset();}
+  draw(ctx){
+    const r=RAIN.angle*Math.PI/180;
+    ctx.beginPath();ctx.moveTo(this.x,this.y);
+    ctx.lineTo(this.x+Math.sin(r)*this.len,this.y+Math.cos(r)*this.len);
+    ctx.strokeStyle=`rgba(180,210,255,${this.opa})`;ctx.lineWidth=this.w;ctx.stroke();
+  }
+}
+let drops=[];
+
+function initRain(){
+  rainC.width=window.innerWidth;rainC.height=window.innerHeight;
+  drops=[];for(let i=0;i<RAIN.drops;i++)drops.push(new Drop(rainC.width,rainC.height,true));
+}
+
+// ===== 豪雨描画 =====
+function drawRain(){
+  const W=rainC.width,H=rainC.height;
+  rainX.clearRect(0,0,W,H);
+  rainX.fillStyle=`rgba(160,185,210,${RAIN.fogOpa*fogK()})`;rainX.fillRect(0,0,W,H);
+  const gf=rainX.createLinearGradient(0,H*0.55,0,H);
+  gf.addColorStop(0,'rgba(180,200,225,0)');gf.addColorStop(1,`rgba(180,200,225,${0.4*fogK()})`);
+  rainX.fillStyle=gf;rainX.fillRect(0,0,W,H);
+  rainX.save();rainX.lineCap='round';
+  drops.forEach(d=>{d.update();d.draw(rainX);});
+  rainX.restore();
+  const vg=rainX.createRadialGradient(W/2,H/2,H*0.25,W/2,H/2,H*0.9);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(20,30,40,0.45)');
+  rainX.fillStyle=vg;rainX.fillRect(0,0,W,H);
+}
+
+// ===== AR障害物描画 =====
+function drawAR(){
+  const W=arC.width,H=arC.height;
+  arX.clearRect(0,0,W,H);
+  arX.fillStyle=`rgba(165,190,215,${0.52*fogK()})`;arX.fillRect(0,0,W,H);
+  const gf2=arX.createLinearGradient(0,H*0.5,0,H);
+  gf2.addColorStop(0,'rgba(178,200,225,0)');
+  gf2.addColorStop(1,`rgba(178,200,225,${0.65*fogK()})`);
+  arX.fillStyle=gf2;arX.fillRect(0,0,W,H);
+  if(myLat===null || myLng===null)return;
+
+  const ob=nearest();
+  // 障害物の外周まで OBS_SHOW(15m) 以内なら、向きに関係なく表示対象にする
+  // （雨の視界は5mのまま。5m超はARが先に知らせる距離として、遠いほど薄く表示）
+  // 通過したら障害物と距離の表示を消す
+  if(ob&&obstacleState(ob).passed) return;
+  if(!ob || ob.d>OBS_SHOW){
+    arX.fillStyle='rgba(200,220,240,0.2)';
+    arX.font='12px sans-serif';
+    arX.textAlign='center';
+    arX.fillText('障害物まで '+(ob?ob.d.toFixed(1)+'m':'距離不明'),W/2,H*0.52);
+    return;
+  }
+
+  // 5m以内: 従来どおり / 5〜15m: 0.25→0.18 へ連続的に薄くする
+  const clarity=ob.d<=5 ? Math.max(0.25,Math.min(1,1-ob.d/5))
+                        : Math.max(0.18,0.25-0.007*(ob.d-5));
+  const bearingToCenter=bear(myLat,myLng,ob.lat,ob.lng);
+  const relB=((bearingToCenter-deviceHeading+orientOfs()+540)%360)-180;
+  const ppd=W/AR_FOV;
+  arX.strokeStyle=`rgba(100,140,180,${0.07*clarity})`;
+  arX.lineWidth=1;arX.setLineDash([4,8]);
+  arX.beginPath();arX.moveTo(0,H*0.52);arX.lineTo(W,H*0.52);arX.stroke();arX.setLineDash([]);
+
+  // 画面内外を問わず、従来と同じく障害物の表示位置を画面内に収める
+  const topH=document.getElementById('top-bar').offsetHeight||60;
+  const botH=window.innerHeight*0.45;
+  // 障害物全体を画面の下側へ移動（向き・距離・立体形状の計算は変更しない）
+  const obRF=relRF(ob.lat,ob.lng);
+  const obP=project(Math.max(-1,obRF.right),Math.max(0,obRF.forward));
+  const groundY=Math.min(H*0.96,project(0,Math.max(0,obRF.forward)).y);
+  const rawXC=obRF.forward>0.5?W/2+groundF()*obRF.right/(obRF.forward+GROUND.zOfs):W/2+relB*ppd;
+  const markerW=Math.max(44,Math.min(W*0.55, W/AR_FOV*12));
+  const xC=Math.max(markerW/2+8,Math.min(W-markerW/2-8,rawXC));
+  const isClamped=Math.abs(xC-rawXC)>1;
+  const isClose=ob.d<=ob.radiusM, isNear=ob.d<=OBS_SHOW/2;
+  const alpha=Math.min(0.95,0.5+0.45*(1-ob.d/OBS_SHOW))*clarity;
+  const faceColor=isClose?`rgba(255,35,35,${alpha})`:isNear?`rgba(255,105,0,${alpha})`:`rgba(255,195,0,${alpha*0.82})`;
+  const topColor=isClose?`rgba(255,75,75,${alpha})`:isNear?`rgba(255,155,35,${alpha})`:`rgba(255,225,100,${alpha})`;
+  const sideColor=isClose?`rgba(155,0,0,${alpha})`:isNear?`rgba(170,55,0,${alpha})`:`rgba(175,115,0,${alpha*0.9})`;
+  const lineColor=isClose?`rgba(255,95,95,${clarity})`:isNear?`rgba(255,170,70,${clarity})`:`rgba(255,230,130,${clarity})`;
+
+  // 立方体の大きさを距離に応じて調整。width/depthは地面上の寸法、heightは高さ。
+  const centerD=Math.max(0.8,ob.centerD||ob.d||1);
+  const focal=W/(2*Math.tan((AR_FOV*Math.PI/180)/2));
+  const scale=Math.max(18,Math.min(groundF()*GROUND.camH/(centerD+GROUND.zOfs), W*0.12));
+  const sizeX=(ob.widthM||2)/2, sizeY=(ob.depthM||2)/2, sizeZ=(ob.heightM||2);
+  const boxRot=(ob.rotationDeg||0)*Math.PI/180;
+  const heading=(deviceHeading-orientOfs())*Math.PI/180;
+  const ch=Math.cos(heading), sh=Math.sin(heading);
+  const cr=Math.cos(boxRot), sr=Math.sin(boxRot);
+
+  // 立方体の8頂点を、障害物の向きと端末の向きに応じて画面座標へ投影
+  const verts=[];
+  for(let z=0;z<=1;z++){
+    for(let iy=0;iy<2;iy++){
+      for(let ix=0;ix<2;ix++){
+        const lx=ix?sizeX:-sizeX, ly=iy?sizeY:-sizeY;
+        const east=lx*cr-ly*sr;
+        const north=lx*sr+ly*cr;
+        const right=east*ch-north*sh;
+        const forward=east*sh+north*ch;
+        // 奥行き方向のずれも反映し、上面に立体感を持たせる
+        const perspective=scale*(1-Math.max(-0.45,Math.min(0.45,forward/Math.max(centerD,1))*0.22));
+        verts.push({x:xC+right*perspective,y:groundY-z*sizeZ*scale+forward*scale*0.18,id:`${ix}${iy}${z}`,east,north,z});
+      }
+    }
+  }
+  const V={
+    '000':verts.find(v=>v.id==='000'),'100':verts.find(v=>v.id==='100'),
+    '010':verts.find(v=>v.id==='010'),'110':verts.find(v=>v.id==='110'),
+    '001':verts.find(v=>v.id==='001'),'101':verts.find(v=>v.id==='101'),
+    '011':verts.find(v=>v.id==='011'),'111':verts.find(v=>v.id==='111')
+  };
+  const viewerBearing=bear(ob.lat,ob.lng,myLat,myLng)*Math.PI/180;
+  const viewEast=Math.sin(viewerBearing), viewNorth=Math.cos(viewerBearing);
+  // 見る位置に応じて手前にある面を選び、面の色も変えて立体感を出す
+  const faces=[
+    {ids:['001','101','111','011'],color:topColor,normal:[0,0,1],depth:1},
+    {ids:['000','010','011','001'],color:sideColor,normal:[-cr,-sr,0],depth:viewEast*(-cr)+viewNorth*(-sr)},
+    {ids:['100','110','111','101'],color:sideColor,normal:[cr,sr,0],depth:viewEast*cr+viewNorth*sr},
+    {ids:['000','100','101','001'],color:faceColor,normal:[-sr,cr,0],depth:viewEast*(-sr)+viewNorth*cr},
+    {ids:['010','110','111','011'],color:faceColor,normal:[sr,-cr,0],depth:viewEast*sr+viewNorth*(-cr)}
+  ];
+  // 奥側から描画し、手前の面が自然に重なるようにする
+  faces.sort((a,b)=>a.depth-b.depth);
+  faces.forEach(face=>{
+    // 上面は常に描画。側面はユーザー側を向いている面だけを描画する。
+    if(face.ids[0]!=='001' && face.depth < -0.05)return;
+    arX.beginPath();
+    face.ids.forEach((id,i)=>{const v=V[id];if(i===0)arX.moveTo(v.x,v.y);else arX.lineTo(v.x,v.y);});
+    arX.closePath();arX.fillStyle=face.color;arX.fill();
+    arX.strokeStyle=lineColor;arX.lineWidth=isClose?3:2;arX.stroke();
+  });
+
+  // 足元の影と警告ガイドは従来の役割を維持
+  arX.beginPath();arX.ellipse(xC,groundY,Math.max(16,sizeX*scale),7*Math.max(0.3,1-ob.d/12),0,0,Math.PI*2);
+  arX.fillStyle=`rgba(255,60,0,${0.18*clarity})`;arX.fill();
+  arX.strokeStyle=`rgba(255,120,0,${0.22*clarity})`;arX.lineWidth=1;arX.setLineDash([3,4]);
+  arX.beginPath();arX.moveTo(xC,groundY);arX.lineTo(xC,groundY-sizeZ*scale);arX.stroke();arX.setLineDash([]);
+
+  const topY=Math.min(V['001'].y,V['101'].y,V['011'].y,V['111'].y);
+  if(isClose&&animFrame%20<10){arX.fillStyle=`rgba(255,40,40,${0.95*clarity})`;arX.font='bold 22px sans-serif';arX.textAlign='center';arX.fillText('⚠',xC,topY-24);}
+  if(clarity>0.2 || ob.d>5){
+    const labA=ob.d>5?0.6:clarity;  // 遠距離でも距離ラベルは読めるようにする
+    arX.fillStyle=`rgba(0,0,0,${0.55*labA})`;
+    arX.beginPath();arX.roundRect(xC-58,topY-34,116,26,5);arX.fill();
+    arX.fillStyle=`rgba(255,255,255,${labA})`;arX.font='bold 13px sans-serif';arX.textAlign='center';
+    arX.fillText(ob.name+'  '+ob.d.toFixed(0)+'m',xC,topY-16);
+  }
+  if(isClamped){
+    arX.fillStyle=`rgba(255,120,0,${Math.max(0.65,clarity)})`;
+    arX.font='bold 18px sans-serif';arX.textAlign='center';
+    arX.fillText(rawXC<xC?'◀':'▶',rawXC<xC?16:W-16,H/2);
+  }
+}
+
+// ===== ナビ更新：徒歩ルートがあればルートに沿って案内 =====
+function updateNav(){
+  if(myLat===null || myLng===null) return;
+  const ob=nearest(), ofs=orientOfs();
+  const arrowEl=document.getElementById('nav-arrow-small');
+  const bigArrow=document.getElementById('arrow');
+  const st=obstacleState(ob);
+  if(exp.rec&&ob) exp.rec.minObsM=Math.min(exp.rec.minObsM??Infinity,ob.d);
+  const hud=document.getElementById('avoid-hud');
+  hud.className=(st.phase==='avoid'?'show':st.phase==='clear'?'show clear':'');
+  if(st.phase==='avoid'||st.phase==='clear'){
+    const sideName=st.side>0?'右':'左';
+    elSet('avoid-hud-text',st.phase==='clear'?'回避OK そのまま直進':sideName+'へ あと '+st.need.toFixed(1)+'m');
+    document.getElementById('avoid-hud-fill').style.width=(st.phase==='clear'?100:Math.max(0,Math.min(100,(1-st.need/st.total)*100)))+'%';
+  }
+  if(st.phase==='avoid'){
+    const plan=avoidPlan(ob,st.side);
+    const ang=bear(myLat,myLng,plan.lat,plan.lng)-deviceHeading+ofs;
+    arrowEl.style.transform='rotate('+ang+'deg)';
+    arrowEl.className='avoid';
+    bigArrow.style.transform='rotate('+ang+'deg)';
+    bigArrow.className='avoid';
+    elSet('nav-msg','⚠️ '+ob.name+'に接近！'+sideName2(st.side)+'へ回避してください','msg-avoid');
+    elSet('nav-dist-top',''); elSet('nav-dist-lbl','');
+  } else if(st.phase==='clear'){
+    const ang=st.course-deviceHeading+ofs;
+    arrowEl.style.transform='rotate('+ang+'deg)'; arrowEl.className='';
+    bigArrow.style.transform='rotate('+ang+'deg)'; bigArrow.className='';
+    elSet('nav-msg','回避できました。そのまま直進してください','msg-safe');
+    const pr=getRouteProgress();
+    elSet('nav-dist-top',pr?Math.round(pr.remaining):''); elSet('nav-dist-lbl','ルート残り(m)');
+  } else {
+    const progress=getRouteProgress();
+    if(progress){
+      const ang=progress.bearing-deviceHeading+ofs;
+      arrowEl.style.transform='rotate('+ang+'deg)'; arrowEl.className='';
+      bigArrow.style.transform='rotate('+ang+'deg)'; bigArrow.className='';
+      const arrived=progress.remaining<=4;
+      if(arrived&&exp.rec&&exp.phase==='walk'&&exp.rec.arrivalMs==null&&exp.t1) exp.rec.arrivalMs=Math.round(performance.now()-exp.t1);
+      elSet('nav-msg',arrived?'ゴール付近です':'ルートに沿って進んでください','msg-safe');
+      elSet('nav-dist-top',Math.round(progress.remaining));
+      elSet('nav-dist-lbl','ルート残り(m)');
+    } else {
+      const dg=dist(myLat,myLng,GOAL.lat,GOAL.lng);
+      const ang=bear(myLat,myLng,GOAL.lat,GOAL.lng)-deviceHeading+ofs;
+      arrowEl.style.transform='rotate('+ang+'deg)'; arrowEl.className='';
+      bigArrow.style.transform='rotate('+ang+'deg)'; bigArrow.className='';
+      elSet('nav-msg','ゴールへ進んでください','msg-safe');
+      elSet('nav-dist-top',Math.round(dg)); elSet('nav-dist-lbl','直線距離(m)');
+    }
+  }
+
+  const row2=document.getElementById('top-row2');
+  if(ob && ob.d<=OBS_SHOW && !st.passed){
+    row2.classList.remove('hidden');
+    const relB=((bear(myLat,myLng,ob.closestLat,ob.closestLng)-deviceHeading+ofs)+540)%360-180;  // 方向ずれ修正: +180を削除（drawARと同じ向き）
+    const dirs=['正面','右前方','右側','右後方','後方','左後方','左側','左前方'];
+    const dname=dirs[Math.round(((relB+360)%360)/45)%8];
+    elSet('obs-warn-dist',ob.d.toFixed(0)+' m');
+    elSet('obs-warn-dir','方向: '+dname);
+    const fill=document.getElementById('obs-warn-bar-fill');
+    const ratio=Math.max(0,Math.min(1,1-ob.d/OBS_SHOW));
+    fill.style.width=(ratio*100)+'%';
+    fill.style.background=ob.d<=ob.radiusM?'#FF3333':ob.d<=OBS_SHOW/2?'#FF8800':'#FFCC00';
+    elSet('obs-warn-bar-label',ob.d<=ob.radiusM?'⚠️ 回避範囲内！':'障害物まで '+ob.d.toFixed(0)+'m / 回避範囲 '+ob.radiusM+'m');
+  } else row2.classList.add('hidden');
+}
+
+// ===== ミニマップ =====
+function drawMap(){
+  const W=mapC.width,H=mapC.height,cx=W/2,cy=H/2;
+  mapX.clearRect(0,0,W,H);
+  mapX.fillStyle='rgba(0,14,0,0.97)';mapX.fillRect(0,0,W,H);
+  if(myLat===null){mapX.fillStyle='rgba(255,255,255,0.3)';mapX.font='20px sans-serif';mapX.textAlign='center';mapX.fillText('GPS取得中…',cx,cy);return;}
+  const dg = dist(myLat, myLng, GOAL.lat, GOAL.lng);
+  const maxD = Math.max(routeDistanceM || dg, dg, 30);
+  const sc = (W * 0.4) / maxD * mapZoom;
+  
+const ob = OBSTACLES[0];
+const northM = (ob.lat - myLat) * 111320;
+const eastM =
+  (ob.lng - myLng) *
+  111320 *
+  Math.cos(myLat * Math.PI / 180);
+
+document.getElementById('map-scale').textContent =
+  `GPS ${myLat.toFixed(6)}, ${myLng.toFixed(6)} | ` +
+  `障害物との差 北${northM.toFixed(1)}m ` +
+  `東${eastM.toFixed(1)}m`;
+  mapX.strokeStyle='rgba(100,200,100,0.07)';mapX.lineWidth=0.5;
+  [0.33,0.67,1].forEach(r=>{mapX.beginPath();mapX.arc(cx,cy,maxD*r*sc,0,Math.PI*2);mapX.stroke();});
+  mapX.strokeStyle='rgba(100,200,100,0.2)';mapX.setLineDash([4,5]);
+  mapX.beginPath();mapX.moveTo(cx,cy);mapX.lineTo(cx,10);mapX.stroke();mapX.setLineDash([]);
+  mapX.fillStyle='rgba(100,200,100,0.5)';mapX.font='12px sans-serif';mapX.textAlign='center';mapX.fillText('N',cx,20);
+  const visPx=RAIN.visM*sc;
+  mapX.beginPath();mapX.arc(cx,cy,visPx,0,Math.PI*2);
+  mapX.strokeStyle='rgba(100,180,255,0.5)';mapX.lineWidth=1.5;mapX.setLineDash([3,3]);mapX.stroke();mapX.setLineDash([]);
+  mapX.fillStyle='rgba(100,180,255,0.07)';mapX.fill();
+  mapX.fillStyle='rgba(100,180,255,0.4)';mapX.font='10px sans-serif';
+  mapX.fillText('視界'+RAIN.visM+'m',cx,cy-visPx-5);
+  const gPx=gps2px(GOAL.lat,GOAL.lng,sc,cx,cy);let avPx=null;
+  OBSTACLES.forEach(ob=>{
+    const corners=obstacleCorners(ob).map(([lat,lng])=>gps2px(lat,lng,sc,cx,cy));
+    const metric=obstacleMetrics(myLat,myLng,ob);
+    const d=metric.d;
+    const px=gps2px(ob.lat,ob.lng,sc,cx,cy);
+
+    // 四角形の外周を描画
+    mapX.beginPath();
+    mapX.moveTo(corners[0].x,corners[0].y);
+    for(let i=1;i<corners.length;i++) mapX.lineTo(corners[i].x,corners[i].y);
+    mapX.closePath();
+    mapX.fillStyle='rgba(255,60,60,0.1)';
+    mapX.fill();
+    mapX.strokeStyle=d<=OBS_SHOW?'rgba(255,60,60,0.85)':'rgba(255,130,60,0.4)';
+    mapX.lineWidth=1.5;
+    mapX.stroke();
+
+    const size=12;
+    mapX.fillStyle='rgba(255,60,60,0.9)';
+    mapX.fillRect(px.x-size/2,px.y-size/2,size,size);
+    mapX.fillStyle='rgba(255,200,180,0.85)';
+    mapX.font='12px sans-serif'; mapX.textAlign='center';
+    mapX.fillText(ob.name,px.x,px.y-13);
+    mapX.fillStyle='rgba(255,200,100,0.7)';
+    mapX.font='11px sans-serif';
+    if(!obsPassed) mapX.fillText(Math.round(d)+'m',px.x,px.y+20);
+  });;
+  
+/* 徒歩ルートをミニマップに描画 */
+if (routeCoords.length >= 2) {
+  mapX.beginPath();
+
+  routeCoords.forEach(([lat, lng], i) => {
+    const p = gps2px(lat, lng, sc, cx, cy);
+
+    if (i === 0) {
+      mapX.moveTo(p.x, p.y);
+    } else {
+      mapX.lineTo(p.x, p.y);
+    }
+  });
+
+  mapX.strokeStyle = '#00FFAA';
+  mapX.lineWidth = 4;
+  mapX.lineJoin = 'round';
+  mapX.lineCap = 'round';
+  mapX.setLineDash([]);
+  mapX.stroke();
+} else {
+  // ルート取得前は従来の直線を表示
+  mapX.beginPath();
+  mapX.moveTo(cx, cy);
+  mapX.lineTo(gPx.x, gPx.y);
+  mapX.strokeStyle = '#00FFAA';
+  mapX.lineWidth = 2;
+  mapX.setLineDash([6, 4]);
+  mapX.stroke();
+  mapX.setLineDash([]);
+}
+  mapX.beginPath();
+  mapX.arc(gPx.x,gPx.y,10,0,Math.PI*2);mapX.fillStyle='#FFD700';mapX.fill();
+  mapX.strokeStyle='#FFF';mapX.lineWidth=1.5;mapX.stroke();
+  mapX.fillStyle='#000';mapX.font='bold 10px sans-serif';mapX.textAlign='center';mapX.fillText('G',gPx.x,gPx.y+4);
+  mapX.fillStyle='rgba(255,215,0,0.8)';mapX.font='11px sans-serif';mapX.fillText(Math.round(routeCoords.length>=2 ? (getRouteProgress()?.remaining ?? dg) : dg)+'m',gPx.x,gPx.y-16);
+  const hRad=(deviceHeading-orientOfs())*Math.PI/180;
+  mapX.strokeStyle='rgba(100,150,255,0.55)';mapX.lineWidth=1.5;
+  mapX.beginPath();mapX.moveTo(cx,cy);mapX.lineTo(cx+Math.sin(hRad)*24,cy-Math.cos(hRad)*24);mapX.stroke();
+  mapX.beginPath();mapX.arc(cx,cy,8,0,Math.PI*2);mapX.fillStyle='#4488FF';mapX.fill();mapX.strokeStyle='#FFF';mapX.lineWidth=2;mapX.stroke();
+}
+
+// ===== 向き判定（画面の幅＞高さ でも判定する安全仕様） =====
+function isLand(){
+  if (window.innerWidth > window.innerHeight) return true;
+  const a = screen.orientation ? screen.orientation.angle : (window.orientation || 0);
+  return a === 90 || a === 270 || a === -90;
+}
+function orientOfs(){
+  const a = screen.orientation ? screen.orientation.angle : (window.orientation || 0);
+  if(a===90) return -90;
+  if(a===270 || a===-90) return 90;
+  return 0;
+}
+function checkOrient(){
+  const land = isLand();
+  const rot = document.getElementById('rotate-screen');
+  const perm = document.getElementById('perm-screen');
+  
+  if (land) {
+    rot.classList.add('hidden');
+    if (!document.body.dataset.started) perm.classList.remove('hidden');
+  } else {
+    if (!document.body.dataset.started) {
+      rot.classList.remove('hidden');
+      perm.classList.add('hidden');
+    }
+  }
+}
+
+['orientationchange','resize'].forEach(e=>window.addEventListener(e,()=>{checkOrient();sync();}));
+if(screen.orientation) screen.orientation.addEventListener('change',()=>{checkOrient();sync();});
+
+checkOrient();
+
+function sync(){
+  arC.width=window.innerWidth;arC.height=window.innerHeight;
+  rainC.width=window.innerWidth;rainC.height=window.innerHeight;
+  groundC.width=window.innerWidth;groundC.height=window.innerHeight;
+  drops.forEach(d=>{d.W=rainC.width;d.H=rainC.height;});
+}
+
+document.getElementById('start-btn').addEventListener('click',async()=>{
+  // 横画面に固定できるブラウザでは固定する（非対応・拒否時は手動横向きで動作）
+  try { if (screen.orientation && screen.orientation.lock) await Promise.race([screen.orientation.lock('landscape'),new Promise(r=>setTimeout(r,800))]); } catch (e) { console.warn('画面固定は利用できません。横画面のまま続行します。', e); }
+  if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){
+    try{const s=await DeviceOrientationEvent.requestPermission();if(s!=='granted'){alert('コンパスの許可が必要です');return;}}catch(e){}
+  }
+  document.getElementById('perm-screen').classList.add('hidden');
+  document.body.dataset.started='1';
+  sync();initRain();startGyro();startGPS();keepAwake();
+  setInterval(drawMap,200);          // マップ更新 0.5秒→0.2秒
+  setInterval(()=>{tickPosition();updateNav();},100); // 表示位置を0.1秒ごとに更新
+  requestAnimationFrame(loop);
+  renderSetup();
+});
+
+function loop(){animFrame++;drawRain();drawAR();drawGround();requestAnimationFrame(loop);}
+
+// ===== GPS & Firebase =====
+/* GPSはページを開いている間ずっと動かし続ける（デザイン切替で取り直さない）。
+   iPhoneのブラウザの更新はおおむね1秒に1回で、コードでは増やせないため、
+   次の測位までの間は直近の移動から現在地を推定して表示の遅れを小さくする。 */
+const gps={lat:null,lng:null,vE:0,vN:0,t:0,acc:null,last:0,intervals:[],fixes:0,error:''};
+const M_LAT=111320, mLng=()=>111320*Math.cos(GOAL.lat*Math.PI/180);
+function onFix(pos){
+  const now=performance.now(), rawLat=pos.coords.latitude, rawLng=pos.coords.longitude;
+  gps.acc=pos.coords.accuracy; gps.fixes++; gps.error=''; gps.rawLat=rawLat; gps.rawLng=rawLng;
+  const dt=gps.t?(now-gps.t)/1000:0;
+  if(gps.t){gps.intervals.push(now-gps.t); if(gps.intervals.length>30)gps.intervals.shift();}
+  if(exp.rec&&(exp.phase==='walk'||exp.phase==='discover')){
+    exp.rec.gpsFixes++; exp.rec.accSum+=gps.acc;
+    if(gps.t) exp.rec.intervals.push(now-gps.t);
+  }
+  if(gps.lat===null||dt<=0||dt>3||exp.gpsMode==='raw'){
+    gps.lat=rawLat;gps.lng=rawLng;gps.vE=0;gps.vN=0;
+  }else{
+    // α-βフィルタ：予測位置と測位結果を混ぜ、速度も少しずつ更新する
+    const pE=gps.vE*dt, pN=gps.vN*dt;
+    const rE=(rawLng-gps.lng)*mLng()-pE, rN=(rawLat-gps.lat)*M_LAT-pN;
+    gps.lng+=(pE+0.6*rE)/mLng(); gps.lat+=(pN+0.6*rN)/M_LAT;
+    gps.vE+=0.2*rE/dt; gps.vN+=0.2*rN/dt;
+    const sp=Math.hypot(gps.vE,gps.vN);
+    if(sp>2.5){gps.vE*=2.5/sp;gps.vN*=2.5/sp;}
+    if(sp<0.25){gps.vE=0;gps.vN=0;}   // 静止時に位置が流れないようにする
+  }
+  gps.t=now;
+  tickPosition();
+  sendFire(rawLat,rawLng);
+  updateNav();
+}
+function tickPosition(){
+  if(gps.lat===null)return;
+  const el=exp.gpsMode==='predict'?Math.min(1.5,(performance.now()-gps.t)/1000):0;
+  myLat=gps.lat+gps.vN*el/M_LAT;
+  myLng=gps.lng+gps.vE*el/mLng();
+}
+function startGPS(){
+  navigator.geolocation.watchPosition(onFix,(err)=>{
+    gps.error='GPSエラー: '+err.code;
+  },{enableHighAccuracy:true,maximumAge:0,timeout:15000});
+}
+const median=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y);return s[Math.floor(s.length/2)];};
+async function keepAwake(){
+  const req=async()=>{try{if(navigator.wakeLock)await navigator.wakeLock.request('screen');}catch(e){}};
+  req(); document.addEventListener('visibilitychange',()=>{if(!document.hidden)req();});
+}
+
+let lastSend=0, dbStatus='待機中';
+async function sendFire(lat, lng) {
+  // ★ エリア外判定をスキップ（どこからでも確実に送信）
+  if(!db) return;
+  if(Date.now()-lastSend<1000) return;
+  lastSend=Date.now();
+  try {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+
+    // ① コレクション名：年月日（例: 20261013）
+    const dateCol = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+
+    // ② ドキュメント名：時分秒-端末ID（例: 153045-u1a2b3c）
+    const timeDoc = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${deviceId}`;
+
+    await setDoc(doc(db, dateCol, timeDoc), {
+      lat,
+      lng,
+      timestamp: serverTimestamp(),
+      deviceId,
+      pid: exp.pid, cond: exp.cond, trial: exp.trial+1, phase: exp.phase, accuracy: gps.acc
+    });
+
+    dbStatus='送信OK '+now.toLocaleTimeString('ja-JP');
+  } catch (e) {
+    console.error('Firebase送信エラー:', e);
+    dbStatus='DBエラー: '+(e.code||e.message);
+  }
+}
+
+// ===== 実験者パネル =====
+const panel=document.getElementById('exp-panel');
+const results=()=>store.get('exp2_results',[]);
+const pidOf=(g,n)=>g+'-'+String(n).padStart(3,'0');
+function showPanel(html){panel.innerHTML=html;panel.classList.remove('hidden');}
+function hidePanel(){panel.classList.add('hidden');panel.innerHTML='';}
+function toast(t,ms=1200){const e=document.getElementById('toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',ms);}
+const $=id=>document.getElementById(id);
+const on=(id,fn)=>{const e=$(id);if(e)e.addEventListener('click',fn);};
+
+function gpsHtml(){return '<div class="muted" id="gps-status"></div>';}
+function updateGpsStatus(){
+  const e=$('gps-status'); if(!e)return;
+  const med=median(gps.intervals);
+  e.textContent=gps.error||(gps.lat===null?'GPS取得中…':
+    `GPS 精度 ${gps.acc?.toFixed(0)}m ／ 更新間隔 ${med?(med/1000).toFixed(1):'--'}秒 ／ 向き ${Math.round((deviceHeading-orientOfs()+360)%360)}° ／ 記録 ${dbError||dbStatus}`);
+}
+setInterval(updateGpsStatus,500);
+
+function fogHtml(){return `<div class="row"><label for="fog">霧の濃さ</label>
+  <input type="range" id="fog" min="0" max="100" step="1" value="${exp.fog}"><b id="fog-v">${exp.fog}%</b></div>
+  <div class="row"><label for="bar">上部表示の位置</label>
+  <input type="range" id="bar" min="0" max="25" step="1" value="${exp.barTop}"><b id="bar-v">${exp.barTop}%</b></div>`;}
+function bindFog(){
+  const b=$('bar');
+  if(b)b.addEventListener('input',()=>{exp.barTop=Number(b.value);$('bar-v').textContent=exp.barTop+'%';store.set('exp2_bar3',exp.barTop);applyBar();});
+  const f=$('fog'); if(!f)return;
+  f.addEventListener('input',()=>{exp.fog=Number(f.value);$('fog-v').textContent=exp.fog+'%';store.set('exp2_fog',exp.fog);});
+}
+function groundHtml(){return `<div class="row">地面の表示
+  <button id="gr-line" class="${exp.groundMode==='line'?'on':''}">線のみ</button>
+  <button id="gr-tri" class="${exp.groundMode==='triangle'?'on':''}">線＋三角</button></div>`;}
+function bindGround(rerender){
+  const set=m=>{exp.groundMode=m;store.set('exp2_ground',m);rerender();};
+  on('gr-line',()=>set('line'));on('gr-tri',()=>set('triangle'));
+}
+function gpsModeHtml(){return `<div class="row">位置の表示
+  <button id="gps-predict" class="${exp.gpsMode==='predict'?'on':''}">推定あり</button>
+  <button id="gps-raw" class="${exp.gpsMode==='raw'?'on':''}">測位のみ</button></div>`;}
+function bindGpsMode(rerender){
+  const set=m=>{exp.gpsMode=m;store.set('exp2_gps',m);gps.vE=0;gps.vN=0;rerender();};
+  on('gps-predict',()=>set('predict'));on('gps-raw',()=>set('raw'));
+}
+function orderFor(group,num){
+  const idx=(num-1)%ORDERS.length;
+  return {pattern:idx+1,order:ORDERS[idx].map(i=>expConds[i])};
+}
+
+function renderSetup(){
+  setPhase('idle');exp.rec=null;
+  const g=exp.group,n=exp.num,o=orderFor(g,n),pid=pidOf(g,n);
+  const done=results().filter(r=>r.pid===pid).length;
+  showPanel(`<h2>実験の準備</h2>
+  <div class="row"><select id="grp"><option value="S"${g==='S'?' selected':''}>学生 (S)</option>
+    <option value="T"${g==='T'?' selected':''}>教職員 (T)</option></select>
+    <input type="number" id="num" min="1" max="999" value="${n}"><b>${pid}</b></div>
+  <div class="muted">順序パターン ${o.pattern}／${ORDERS.length}：${o.order.map(c=>CONDITIONS[c].label).join(' → ')}</div>
+  ${done?`<div class="warn">この番号は ${done}/${o.order.length} 条件まで保存済みです。続きから始めます。</div>`:''}
+  ${fogHtml()}${groundHtml()}${gpsModeHtml()}${gpsHtml()}
+  <div class="${routeCfg.points.length>=2?'muted':'warn'}">${routeCfg.points.length>=2?`ルート ${routeCfg.points.length}地点・全長${Math.round(routeLength(routeCfg.points))}m`:'ルートが未登録です。先に登録してください。'}</div>
+  <div class="row"><button class="primary" id="begin"${routeCfg.points.length>=2?'':' disabled style="opacity:.4"'}>この参加者の実験を始める</button></div>
+  <div class="row"><button id="reg">ルート登録</button><button id="free">自由確認（霧の調整）</button><button id="csv">CSVを保存</button></div>
+  <div class="muted">端末内の保存：${results().length}件</div>`);
+  $('grp').onchange=e=>{exp.group=e.target.value;renderSetup();};
+  $('num').onchange=e=>{exp.num=Math.max(1,Math.min(999,parseInt(e.target.value)||1));renderSetup();};
+  bindFog();bindGround(renderSetup);bindGpsMode(renderSetup);updateGpsStatus();
+  on('begin',()=>{
+    if(routeCfg.points.length<2)return;
+    exp.pid=pid;exp.pattern=o.pattern;exp.order=o.order;
+    exp.trial=results().filter(r=>r.pid===pid).length;exp.dirOverride=null;
+    renderReady();
+  });
+  on('free',renderFree);on('csv',downloadCsv);on('reg',renderRoute);
+}
+
+// 方向：既定は条件ごとに交互。実験者が順方向・逆方向を選び直せる
+const currentReverse=()=>exp.dirOverride??trialReverse(exp.trial);
+function dirHtml(rev){return `<div class="row">方向
+  <button id="dir-f" class="${rev?'':'on'}">順方向</button><button id="dir-r" class="${rev?'on':''}">逆方向</button></div>`;}
+function renderReady(){
+  setPhase('idle');
+  if(exp.trial>=exp.order.length){renderFinished();return;}
+  const c=exp.order[exp.trial];setCondition(c);
+  showPanel(`<h2>${exp.pid}：${exp.trial+1}／${exp.order.length} 条件目</h2>
+  <div class="row"><b style="font-size:20px">${CONDITIONS[c].label}</b></div>
+  ${dirHtml(currentReverse())}
+  <div class="muted">${currentReverse()?'逆方向：広場の東端から出発し、西端へ':'順方向：広場の西端から出発し、東端へ'}${exp.dirOverride!=null&&exp.dirOverride!==trialReverse(exp.trial)?'（自動の割り当てから変更中）':''}</div>
+  ${fogHtml()}${gpsHtml()}
+  <div class="muted">「表示開始」で画面が出て、時間の計測が始まります。参加者が回答したら画面のどこかを1回タップします。</div>
+  <div class="row"><button class="primary" id="go">表示開始</button><button id="back">準備画面へ</button></div>`);
+  bindFog();updateGpsStatus();
+  on('dir-f',()=>{exp.dirOverride=false;renderReady();});on('dir-r',()=>{exp.dirOverride=true;renderReady();});
+  on('go',startTrial);on('back',renderSetup);
+}
+function startTrial(){
+  hidePanel();
+  const rev=currentReverse();applyRoute(rev);resetAvoid();mapZoom=1;
+  exp.rec={pid:exp.pid,group:exp.pid[0],pattern:exp.pattern,trialNo:exp.trial+1,condition:exp.cond,conditionLabel:CONDITIONS[exp.cond].label,
+    direction:currentReverse()?'reverse':'forward',directionChanged:currentReverse()!==trialReverse(exp.trial),arrivalMs:null,fogPercent:exp.fog,groundMode:exp.groundMode,gpsMode:exp.gpsMode,startedAt:new Date().toISOString(),discoveryMs:null,walkMs:null,
+    gpsFixes:0,accSum:0,intervals:[],minObsM:null,avoidEvents:0,mapZoomUses:0};
+  exp.t0=performance.now();exp.wasAvoid=false;
+  setPhase('discover');updateNav();
+}
+$('tap-layer').addEventListener('pointerdown',()=>{
+  if(exp.phase!=='discover')return;
+  exp.rec.discoveryMs=Math.round(performance.now()-exp.t0);
+  exp.t1=performance.now();
+  setPhase('walk');
+  toast('記録 '+(exp.rec.discoveryMs/1000).toFixed(2)+'秒');
+});
+// 左上の角を1秒長押し：歩行終了や中断のメニューを開く
+let holdT=null;
+$('corner').addEventListener('pointerdown',e=>{e.preventDefault();e.stopPropagation();holdT=setTimeout(openMenu,1000);});
+['pointerup','pointercancel','pointerleave'].forEach(t=>$('corner').addEventListener(t,()=>clearTimeout(holdT)));
+$('corner').addEventListener('contextmenu',e=>e.preventDefault());
+function openMenu(){
+  if(exp.phase==='free'){renderFreePanel();return;}
+  showPanel(`<h2>${exp.pid}：${exp.trial+1}条件目</h2>${gpsHtml()}
+  <div class="row"><button class="primary" id="end">歩行を終了して記録へ</button></div>
+  <div class="row"><button id="resume">閉じて続ける</button><button id="redo">この条件をやり直す</button></div>`);
+  updateGpsStatus();
+  on('end',()=>{
+    if(exp.t1)exp.rec.walkMs=Math.round(performance.now()-exp.t1);
+    if(exp.phase==='discover')exp.rec.walkMs=null;
+    setPhase('idle');renderResult();
+  });
+  on('resume',hidePanel);
+  on('redo',()=>{exp.rec=null;exp.t1=null;renderReady();});
+}
+function choice(name,label,opts){
+  return `<div class="row"><span style="min-width:96px">${label}</span>`+opts.map(o=>`<button data-n="${name}" data-v="${o}">${o}</button>`).join('')+'</div>';
+}
+function renderResult(){
+  const r=exp.rec, ans={};
+  showPanel(`<h2>${r.pid}：${r.conditionLabel} の記録</h2>
+  <div class="muted">発見時間 ${r.discoveryMs!=null?(r.discoveryMs/1000).toFixed(2)+'秒':'未記録'} ／ 歩行 ${r.walkMs!=null?Math.round(r.walkMs/1000)+'秒':'未記録'}</div>
+  ${choice('comprehension','理解度（正答数）',[0,1,2])}
+  ${choice('danger','危険認識',['○','×'])}
+  ${choice('avoidance','回避判断',['○','×'])}
+  ${choice('errors','見落とし・誤操作',[0,1,2,3,4,5])}
+  <input type="text" id="note" placeholder="メモ（中断、GPSの乱れなど）">
+  <div class="warn" id="missing"></div>
+  <div class="row"><button class="primary" id="save">保存して次へ</button></div>`);
+  panel.querySelectorAll('button[data-n]').forEach(b=>b.onclick=()=>{
+    ans[b.dataset.n]=b.dataset.v;
+    panel.querySelectorAll(`button[data-n="${b.dataset.n}"]`).forEach(x=>x.classList.toggle('on',x===b));
+  });
+  on('save',()=>{
+    const need=['comprehension','danger','avoidance','errors'].filter(k=>ans[k]===undefined);
+    if(need.length){$('missing').textContent='未入力の項目があります';return;}
+    saveResult({...ans,note:$('note').value});
+  });
+}
+function saveResult(ans){
+  const r=exp.rec;
+  const row={pid:r.pid,group:r.group,pattern:r.pattern,trialNo:r.trialNo,condition:r.condition,conditionLabel:r.conditionLabel,
+    direction:r.direction,directionChanged:r.directionChanged,discoveryMs:r.discoveryMs,walkMs:r.walkMs,arrivalMs:r.arrivalMs,...ans,fogPercent:r.fogPercent,groundMode:r.groundMode,gpsMode:r.gpsMode,gpsFixes:r.gpsFixes,
+    gpsMedianIntervalMs:r.intervals.length?Math.round(median(r.intervals)):null,gpsMeanAccuracyM:r.gpsFixes?+(r.accSum/r.gpsFixes).toFixed(1):null,
+    minObstacleM:r.minObsM==null||r.minObsM===Infinity?null:+r.minObsM.toFixed(1),avoidEvents:r.avoidEvents,mapZoomUses:r.mapZoomUses,startedAt:r.startedAt};
+  const all=results();all.push(row);store.set('exp2_results',all);
+  if(db)setDoc(doc(db,'exp2_results',`${r.pid}_${r.trialNo}`),row).catch(e=>{dbStatus='DBエラー: '+(e.code||e.message);});
+  exp.rec=null;exp.t1=null;exp.trial++;exp.dirOverride=null;
+  renderReady();
+}
+function renderFinished(){
+  showPanel(`<h2>${exp.pid}：全条件が終わりました</h2>
+  <div class="row"><button class="primary" id="next">次の参加者へ</button><button id="csv">CSVを保存</button></div>`);
+  on('next',()=>{exp.num++;renderSetup();});on('csv',downloadCsv);
+}
+function renderFree(){
+  exp.pid=null;exp.rec=null;exp.freeReverse=false;applyRoute(false);resetAvoid();setPhase('free');renderFreePanel();
+}
+function renderFreePanel(){
+  const opts=Object.entries(CONDITIONS).map(([k,v])=>`<button data-c="${k}" class="${exp.cond===k?'on':''}">${v.label}</button>`).join('');
+  showPanel(`<h2>自由確認</h2>${dirHtml(!!exp.freeReverse)}${fogHtml()}${groundHtml()}${gpsModeHtml()}${gpsHtml()}
+  <div class="row">${opts}</div>
+  <div class="muted">パネルを閉じた後、左上の角を1秒長押しすると戻ります。</div>
+  <div class="row"><button class="primary" id="close">閉じて確認する</button><button id="back">準備画面へ</button></div>`);
+  bindFog();bindGround(renderFreePanel);bindGpsMode(renderFreePanel);updateGpsStatus();
+  const setFreeDir=v=>{exp.freeReverse=v;applyRoute(v);resetAvoid();renderFreePanel();};
+  on('dir-f',()=>setFreeDir(false));on('dir-r',()=>setFreeDir(true));
+  panel.querySelectorAll('button[data-c]').forEach(b=>b.onclick=()=>{setCondition(b.dataset.c);renderFreePanel();});
+  on('close',hidePanel);on('back',renderSetup);
+}
+function downloadCsv(){
+  const rows=results();
+  if(!rows.length){toast('保存済みのデータはありません');return;}
+  const cols=['pid','group','pattern','trialNo','condition','conditionLabel','direction','directionChanged','discoveryMs','walkMs','arrivalMs','comprehension','danger','avoidance','errors','note','fogPercent','groundMode','gpsMode','gpsFixes','gpsMedianIntervalMs','gpsMeanAccuracyM','minObstacleM','avoidEvents','mapZoomUses','startedAt'];
+  const q=v=>{const s=v==null?'':String(v);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+  const csv='﻿'+[cols.join(','),...rows.map(r=>cols.map(c=>q(r[c])).join(','))].join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='exp2_results.csv';document.body.appendChild(a);a.click();a.remove();
+}
+// マップの拡大・縮小（1倍・2倍・4倍）
+const zoomBy=f=>{mapZoom=Math.max(1,Math.min(4,mapZoom*f));if(exp.rec)exp.rec.mapZoomUses++;drawMap();};
+$('map-plus').addEventListener('click',()=>zoomBy(2));
+$('map-minus').addEventListener('click',()=>zoomBy(0.5));
+applyBar();
+
+// ===== ルート登録：その場所に立ち、10秒間のGPSを平均して地点にする =====
+let sampling=false;
+function sample10s(cb){
+  if(sampling)return;sampling=true;
+  const pts=[],t0=Date.now(),seen=gps.fixes;let last=-1;
+  const iv=setInterval(()=>{
+    if(gps.fixes!==last&&gps.rawLat!=null){last=gps.fixes;pts.push([gps.rawLat,gps.rawLng]);}
+    const e=$('sampling');if(e)e.textContent=`測定中… ${Math.max(0,10-Math.floor((Date.now()-t0)/1000))}秒（動かないでください）`;
+    if(Date.now()-t0>=10000){clearInterval(iv);sampling=false;
+      if(!pts.length){const m=$('sampling');if(m)m.textContent='GPSを取得できませんでした';return;}
+      cb([pts.reduce((a,p)=>a+p[0],0)/pts.length,pts.reduce((a,p)=>a+p[1],0)/pts.length].map(v=>+v.toFixed(7)));}
+  },100);
+}
+function renderRoute(){
+  setPhase('idle');
+  const P=routeCfg.points;
+  const legs=P.slice(1).map((p,i)=>dist(P[i][0],P[i][1],p[0],p[1]).toFixed(1)+'m').join(' → ');
+  const ob=obstaclePoint();
+  showPanel(`<h2>ルート登録</h2>
+  <div class="muted">指定ルートは入力済みです。変更するときだけ使います。スタートから順に、各地点（曲がり角とゴール）に立って押します。</div>
+  <div class="row"><b>${P.length}地点</b><span>${legs||'—'}</span>${P.length>=2?`<b>計${Math.round(routeLength(P))}m</b>`:''}</div>
+  <div class="row"><button class="primary" id="add">ここを次の地点にする</button><button id="undo">1つ戻す</button><button id="clear">全部消す</button><button id="builtin">指定ルートに戻す</button></div>
+  <div class="row muted">障害物：${routeCfg.obs?'登録した位置':'最も長い区間の中央（自動）'}${ob?` ${ob[0].toFixed(6)}, ${ob[1].toFixed(6)}`:''}</div>
+  <div class="row"><button id="obs">ここに障害物を置く</button><button id="obsauto">自動に戻す</button></div>
+  ${gpsHtml()}<div class="warn" id="sampling"></div>
+  <div class="muted">このリンクを保存すると、別の端末でも同じルートを使えます。</div>
+  <input type="text" readonly id="share" value="${routeLink()}">
+  <div class="row"><button id="back">準備画面へ</button></div>`);
+  updateGpsStatus();
+  const commit=()=>{saveRouteCfg();applyRoute(false);renderRoute();};
+  on('add',()=>sample10s(p=>{P.push(p);commit();}));
+  on('undo',()=>{P.pop();commit();});
+  on('clear',()=>{routeCfg.points=[];routeCfg.obs=null;commit();});
+  on('obs',()=>sample10s(p=>{routeCfg.obs=p;commit();}));
+  on('builtin',()=>{routeCfg.points=BUILTIN_ROUTE.map(p=>[...p]);routeCfg.obs=null;commit();});
+  on('obsauto',()=>{routeCfg.obs=null;commit();});
+  on('back',renderSetup);
+}
+window.__exp={exp,gps,routeCfg,passed:()=>obsPassed,BUILTIN_ROUTE,currentReverse,trialReverse,goal:()=>GOAL,obstacle:()=>OBSTACLES[0],state:()=>obstacleState(nearest()),zoom:()=>mapZoom,progress:()=>getRouteProgress(),setCondition,williams,CONDITIONS,ORDERS,results,dbg:()=>{const ob=nearest();return {h:deviceHeading,ofs:orientOfs(),course:intendedBearing(),d:ob?.d,inPath:ob?obstacleInPath(ob):null,goal:GOAL,obs:OBSTACLES[0],bearObs:ob?bear(myLat,myLng,ob.lat,ob.lng):null,arrow:document.getElementById('arrow').style.transform};}};
+
+// ===== コンパス =====
+function startGyro(){
+  window.addEventListener('deviceorientationabsolute',e=>{if(e.alpha!==null){deviceHeading=e.alpha;updateNav();}},true);
+  window.addEventListener('deviceorientation',e=>{
+    if(e.webkitCompassHeading!==undefined)deviceHeading=e.webkitCompassHeading;
+    else if(e.absolute&&e.alpha!==null)deviceHeading=e.alpha;
+    updateNav();
+  },true);
+}
+
+// ===== ユーティリティ =====
+function gps2px(lat,lng,sc,cx,cy){const dLat=lat-myLat,dLng=lng-myLng;return{x:cx+dLng*111000*Math.cos(myLat*Math.PI/180)*sc,y:cy-dLat*111000*sc};}
+
+// 四角形の四隅を緯度・経度で計算
+function obstacleCorners(ob){
+  const a=(ob.rotationDeg||0)*Math.PI/180;
+  const hx=(ob.widthM||2)/2, hy=(ob.depthM||2)/2;
+  const c=Math.cos(a), s=Math.sin(a);
+  return [[-hx,-hy],[hx,-hy],[hx,hy],[-hx,hy]].map(([x,y])=>{
+    const east=x*c-y*s;
+    const north=x*s+y*c;
+    return [
+      ob.lat+north/111320,
+      ob.lng+east/(111320*Math.cos(ob.lat*Math.PI/180))
+    ];
+  });
+}
+
+// GPS位置から四角形の外周までの最短距離と最寄り点を計算
+function obstacleMetrics(lat,lng,ob){
+  const cosLat=Math.cos(ob.lat*Math.PI/180);
+  const east=(lng-ob.lng)*111320*cosLat;
+  const north=(lat-ob.lat)*111320;
+  const a=(ob.rotationDeg||0)*Math.PI/180;
+  const c=Math.cos(a), s=Math.sin(a);
+  const x=east*c+north*s;
+  const y=-east*s+north*c;
+  const hx=(ob.widthM||2)/2, hy=(ob.depthM||2)/2;
+  const inside=Math.abs(x)<=hx && Math.abs(y)<=hy;
+  let qx=Math.max(-hx,Math.min(hx,x));
+  let qy=Math.max(-hy,Math.min(hy,y));
+  if(inside){
+    const edges=[
+      {d:hx-x,x:hx,y:y}, {d:hx+x,x:-hx,y:y},
+      {d:hy-y,x:x,y:hy}, {d:hy+y,x:x,y:-hy}
+    ].sort((u,v)=>u.d-v.d);
+    qx=edges[0].x; qy=edges[0].y;
+  }
+  const d=inside?0:Math.hypot(qx-x,qy-y);
+  const eastQ=qx*c-qy*s;
+  const northQ=qx*s+qy*c;
+  return {
+    d,
+    centerD:dist(lat,lng,ob.lat,ob.lng),
+    closestLat:ob.lat+northQ/111320,
+    closestLng:ob.lng+eastQ/(111320*cosLat),
+    inside
+  };
+}
+
+function nearest(){
+  if(myLat===null || myLng===null) return null;
+  let n=null, m=Infinity;
+  OBSTACLES.forEach(o=>{
+    const metrics=obstacleMetrics(myLat,myLng,o);
+    if(metrics.d<m){m=metrics.d;n=Object.assign({},o,metrics);}
+  });
+  return n;
+}
+
+function angleDiff(a,b){return ((a-b+540)%360)-180;}
+
+// 徒歩ルートがあればルートの進行方向、なければゴール方向を使う
+function intendedBearing(){
+  const progress=getRouteProgress();
+  if(progress) return progress.bearing;
+  return bear(myLat,myLng,GOAL.lat,GOAL.lng);
+}
+
+/* ===== 回避の判定 =====
+   回避方向は開始時に固定し、GPSのぶれで左右が入れ替わらないようにする。
+   障害物の外周から radiusM（3m）より外へ出たら「回避OK」にする。 */
+let avoidSide=0, avoidClear=false, obsPassed=false;
+function resetAvoid(){avoidSide=0;avoidClear=false;obsPassed=false;}
+const sideName2=s=>s>0?'右側':'左側';
+function routeTangent(){
+  const p=getRouteProgress();
+  if(p) return p.tangent;
+  return bear(myLat,myLng,GOAL.lat,GOAL.lng);
+}
+function needClear(ob){return Math.max(ob.widthM||2,ob.depthM||2)/2+ob.radiusM;}
+function obstacleState(ob){
+  if(!ob) return {phase:'none'};
+  const course=routeTangent(), rad=course*Math.PI/180;
+  const east=(ob.lng-myLng)*111320*Math.cos(myLat*Math.PI/180);
+  const north=(ob.lat-myLat)*111320;
+  const forward=east*Math.sin(rad)+north*Math.cos(rad);
+  const lateral=east*Math.cos(rad)-north*Math.sin(rad);  // 障害物が右にあれば正
+  const half=Math.max(ob.widthM||2,ob.depthM||2)/2, total=needClear(ob);
+  // 通過の判定：障害物より1m以上先、かつルート上でも先に進んでいれば「通過」とし、
+  // 曲がり角の先でも表示が戻らないよう保持する（ルートを大きく戻ったときだけ解除）
+  if(forward<-(half+1)&&progressIdx>obsIdx) obsPassed=true;
+  else if(obsPassed&&progressIdx>=0&&progressIdx<obsIdx-3) obsPassed=false;
+  const passed=obsPassed;
+  if(passed||ob.d>10){ avoidSide=0; avoidClear=false; return {phase:'none',passed}; }
+  if(!avoidSide){
+    const facing=Math.abs(angleDiff(bear(myLat,myLng,ob.lat,ob.lng),deviceHeading-orientOfs()))<=100;
+    if(ob.d<=8 && forward>-half && Math.abs(lateral)<total && facing){
+      const c=s=>{const p=avoidPlan(ob,s);return dist(myLat,myLng,p.lat,p.lng)+dist(p.lat,p.lng,GOAL.lat,GOAL.lng);};
+      avoidSide=c(1)<=c(-1)?1:-1; avoidClear=false;
+      if(exp.rec) exp.rec.avoidEvents++;
+    } else return {phase:'none',passed};
+  }
+  const offset=avoidSide>0?-lateral:lateral;   // 選んだ側へどれだけ離れたか
+  const need=Math.max(0,total-offset);
+  if(need<=0) avoidClear=true; else if(need>0.7) avoidClear=false; // 0.7mの余裕でちらつきを防ぐ
+  return {phase:avoidClear?'clear':'avoid',side:avoidSide,need,total,course,passed};
+}
+// 障害物の横（回避範囲の少し外）に目標地点を置く
+function avoidPlan(ob,side){
+  const rad=routeTangent()*Math.PI/180;
+  const rE=Math.cos(rad), rN=-Math.sin(rad), cl=(needClear(ob)+0.4)*side;
+  return {lat:ob.lat+rN*cl/111320,lng:ob.lng+rE*cl/(111320*Math.cos(ob.lat*Math.PI/180))};
+}
+
+/* ===== 地面の表現 =====
+   スマホのコンパスの向きだけを使う疑似的な地面（首を動かしても追従しない）。 */
+const GROUND={camH:1.0,zOfs:3,horizon:0.40};
+const groundF=()=>groundC.width/(2*Math.tan((AR_FOV*Math.PI/180)/2));
+function relRF(lat,lng){
+  const e=(lng-myLng)*111320*Math.cos(myLat*Math.PI/180), n=(lat-myLat)*111320;
+  const h=(deviceHeading-orientOfs())*Math.PI/180;
+  return {right:e*Math.cos(h)-n*Math.sin(h),forward:e*Math.sin(h)+n*Math.cos(h)};
+}
+function project(right,forward){
+  const z=Math.max(0.6,forward+GROUND.zOfs),f=groundF();
+  return {x:groundC.width/2+f*right/z,y:groundC.height*GROUND.horizon+f*GROUND.camH/z};
+}
+// 地面に幅のある線を描く（pts:[[緯度,経度],...]）。triangle=trueなら途中に三角を1つ置く
+function groundLine(pts,color,triangle){
+  const rf=pts.map(([a,b])=>relRF(a,b));
+  // 足元より手前は切り捨てる
+  const near=0.8, P=[];
+  for(let i=0;i<rf.length;i++){
+    if(rf[i].forward>=near){
+      if(i>0&&rf[i-1].forward<near){
+        const t=(near-rf[i-1].forward)/(rf[i].forward-rf[i-1].forward);
+        P.push({right:rf[i-1].right+(rf[i].right-rf[i-1].right)*t,forward:near});
+      }
+      P.push(rf[i]);
+    }else if(P.length) break;
+  }
+  if(P.length<2) return;
+  const w=0.04, L=[],R=[];
+  P.forEach((p,i)=>{
+    const a=P[Math.max(0,i-1)],b=P[Math.min(P.length-1,i+1)];
+    const dx=b.right-a.right,dy=b.forward-a.forward,l=Math.hypot(dx,dy)||1;
+    const nx=dy/l*w,ny=-dx/l*w;
+    L.push(project(p.right-nx,p.forward-ny));R.push(project(p.right+nx,p.forward+ny));
+  });
+  gX.beginPath();
+  L.forEach((q,i)=>i?gX.lineTo(q.x,q.y):gX.moveTo(q.x,q.y));
+  R.reverse().forEach(q=>gX.lineTo(q.x,q.y));
+  gX.closePath();gX.globalAlpha=0.85;gX.fillStyle=color;gX.fill();
+  if(triangle){
+    // 線上で約5m先に三角を1つ
+    let s=0,k=1;for(;k<P.length;k++){const d=Math.hypot(P[k].right-P[k-1].right,P[k].forward-P[k-1].forward);if(s+d>=4.5)break;s+=d;}
+    k=Math.min(k,P.length-1);
+    const a=P[k-1],b=P[k],dx=b.right-a.right,dy=b.forward-a.forward,l=Math.hypot(dx,dy)||1,ux=dx/l,uy=dy/l;
+    const c={right:b.right,forward:b.forward},hw=0.5,len=1.1;
+    const tri=[[c.right+ux*len,c.forward+uy*len],[c.right+uy*hw,c.forward-ux*hw],[c.right-uy*hw,c.forward+ux*hw]]
+      .map(([r,f])=>project(r,Math.max(near,f)));
+    gX.beginPath();tri.forEach((q,i)=>i?gX.lineTo(q.x,q.y):gX.moveTo(q.x,q.y));gX.closePath();gX.fill();
+  }
+  gX.globalAlpha=1;
+}
+function drawGround(){
+  const W=groundC.width,H=groundC.height;
+  gX.clearRect(0,0,W,H);
+  if(myLat===null||exp.phase==='idle') return;
+  const ob=nearest(), st=ob?obstacleState(ob):{phase:'none'};
+  const guide=CONDITIONS[exp.cond].guide||'#FFD700';
+  const k=Math.cos(myLat*Math.PI/180);
+  // 回避範囲の輪（15m以内）
+  if(ob&&ob.d<=OBS_SHOW&&!st.passed){
+    const R=needClear(ob), inside=ob.d<=ob.radiusM;
+    gX.beginPath();let pen=false;
+    for(let a=0;a<=48;a++){
+      const t=a/48*2*Math.PI;
+      const rf=relRF(ob.lat+R*Math.cos(t)/111320,ob.lng+R*Math.sin(t)/(111320*k));
+      if(rf.forward<-1.5){pen=false;continue;}
+      const q=project(rf.right,rf.forward);
+      pen?gX.lineTo(q.x,q.y):gX.moveTo(q.x,q.y);pen=true;
+    }
+    gX.setLineDash([10,7]);gX.lineWidth=3;gX.strokeStyle=inside?'rgba(255,70,70,0.85)':'rgba(255,170,70,0.7)';gX.stroke();gX.setLineDash([]);
+  }
+  // 地面のルート線
+  const tri=false;
+  if(st.phase==='avoid'){
+    const p=avoidPlan(ob,st.side);
+    groundLine([[myLat,myLng],[p.lat,p.lng]],'#FF6600',tri);
+  }else if(st.phase==='clear'){
+    const r=st.course*Math.PI/180;
+    groundLine([[myLat,myLng],[myLat+Math.cos(r)*12/111320,myLng+Math.sin(r)*12/(111320*k)]],guide,tri);
+  }else if(routeCoords.length>=2&&progressIdx>=0){
+    groundLine(routeCoords.slice(progressIdx,progressIdx+18),guide,tri);
+  }
+}
+
+function dist(a,b,c,d){const R=6371000,dL=(c-a)*Math.PI/180,dG=(d-b)*Math.PI/180;const x=Math.sin(dL/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(dG/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
+function bear(a,b,c,d){const dG=(d-b)*Math.PI/180;const y=Math.sin(dG)*Math.cos(c*Math.PI/180);const x=Math.cos(a*Math.PI/180)*Math.sin(c*Math.PI/180)-Math.sin(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.cos(dG);return(Math.atan2(y,x)*180/Math.PI+360)%360;}
+function inPoly(p,vs){let i=false;for(let a=0,b=vs.length-1;a<vs.length;b=a++){const[xa,ya]=vs[a],[xb,yb]=vs[b];if(((ya>p[0])!=(yb>p[0]))&&(p[1]<(xb-xa)*(p[0]-ya)/(yb-ya)+xa))i=!i;}return i;}
+function elSet(id,txt,cls){const e=document.getElementById(id);if(!e)return;e.textContent=txt;if(cls!==undefined)e.className=cls;}
+</script>
+</body>
+</html>
