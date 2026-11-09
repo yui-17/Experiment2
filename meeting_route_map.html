@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>集合場所と実験ルート</title>
+<style>
+body{margin:0;padding:16px;background:#f2f4f6;font-family:"Hiragino Sans","Yu Gothic","Meiryo",sans-serif;color:#1d2733}
+.bar{max-width:1200px;margin:0 auto 10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+button{font-size:16px;padding:10px 18px;border:0;border-radius:8px;background:#1f5f99;color:#fff;font-weight:bold;cursor:pointer}
+#msg{font-size:14px;color:#555}
+canvas{display:block;max-width:100%;height:auto;margin:0 auto;box-shadow:0 2px 10px rgba(0,0,0,.2);background:#e8e8e8}
+</style></head><body>
+<div class="bar"><button id="save">画像として保存（PNG）</button><span id="msg">地図を読み込み中…</span></div>
+<canvas id="map" width="1200" height="800"></canvas>
+<script>
+// ===== 位置（緯度, 経度） =====
+const MEET=[36.1082595,139.3629834];                       // 集合場所：ネットカフェの扉の前
+const ROUTE=[[36.10825,139.3631111],[36.10825,139.3633333], // 実験で歩くルート（西端→東端）
+             [36.1083611,139.3633333],[36.1083333,139.3636389]];
+const Z=19, SCALE=2;
+// OpenStreetMapの地図タイル（https のページから開く必要がある。ファイルを直接開くと拒否される）
+const SOURCES=[
+  {url:(x,y)=>`https://tile.openstreetmap.org/${Z}/${x}/${y}.png`,credit:'© OpenStreetMap contributors'},
+];
+const used=new Set();                                         // OSMタイルのズーム19を2倍で表示
+const cv=document.getElementById('map'), g=cv.getContext('2d'), W=cv.width, H=cv.height;
+const T=256*SCALE;
+const wx=lng=>(lng+180)/360*Math.pow(2,Z)*T;
+const wy=lat=>{const r=lat*Math.PI/180;return (1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*Math.pow(2,Z)*T;};
+const all=[MEET,...ROUTE];
+const cLat=(Math.min(...all.map(p=>p[0]))+Math.max(...all.map(p=>p[0])))/2;
+const cLng=(Math.min(...all.map(p=>p[1]))+Math.max(...all.map(p=>p[1])))/2;
+const ox=wx(cLng)-W/2, oy=wy(cLat)-H/2+30;
+const px=p=>[wx(p[1])-ox, wy(p[0])-oy];
+
+function loadTiles(){
+  const tx0=Math.floor(ox/T), ty0=Math.floor(oy/T), tx1=Math.floor((ox+W)/T), ty1=Math.floor((oy+H)/T);
+  const jobs=[];
+  for(let x=tx0;x<=tx1;x++)for(let y=ty0;y<=ty1;y++){
+    jobs.push(new Promise(res=>{
+      const im=new Image(); im.crossOrigin='anonymous';
+      let k=0;
+      im.onerror=()=>{k++;if(k<SOURCES.length){im.src=SOURCES[k].url(x,y);}else res(false);};
+      im.onload=()=>{g.drawImage(im,x*T-ox,y*T-oy,T,T);used.add(SOURCES[k].credit);res(true);};
+      im.src=SOURCES[0].url(x,y);
+    }));
+  }
+  return Promise.all(jobs);
+}
+function rr(x,y,w,h,r){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();}
+function label(text,x,y,opt={}){
+  g.font=`bold ${opt.size||22}px "Hiragino Sans","Yu Gothic","Meiryo",sans-serif`;
+  const w=g.measureText(text).width+24,h=(opt.size||22)+18;
+  const bx=opt.align==='right'?x-w:opt.align==='center'?x-w/2:x, by=y-h/2;
+  rr(bx,by,w,h,8);g.fillStyle='rgba(255,255,255,0.94)';g.fill();g.lineWidth=2.5;g.strokeStyle=opt.color||'#333';g.stroke();
+  g.fillStyle=opt.color||'#222';g.textBaseline='middle';g.textAlign='left';g.fillText(text,bx+12,y+1);
+}
+function pin(x,y,k=1){
+  g.save();g.translate(x,y);g.scale(k,k);
+  g.beginPath();g.ellipse(0,0,14,5,0,0,Math.PI*2);g.fillStyle='rgba(0,0,0,0.25)';g.fill();
+  g.beginPath();g.moveTo(0,0);g.bezierCurveTo(-8,-18,-26,-34,-26,-56);g.arc(0,-56,26,Math.PI,0);g.bezierCurveTo(26,-34,8,-18,0,0);g.closePath();
+  g.fillStyle='#D7263D';g.fill();g.lineWidth=3;g.strokeStyle='#fff';g.stroke();
+  g.beginPath();g.arc(0,-56,10,0,Math.PI*2);g.fillStyle='#fff';g.fill();
+  g.restore();
+}
+function overlay(){
+  // ルート
+  const P=ROUTE.map(px);
+  g.lineJoin='round';g.lineCap='round';
+  g.beginPath();P.forEach((q,i)=>i?g.lineTo(...q):g.moveTo(...q));g.strokeStyle='#fff';g.lineWidth=17;g.stroke();
+  g.beginPath();P.forEach((q,i)=>i?g.lineTo(...q):g.moveTo(...q));g.strokeStyle='#1565C0';g.lineWidth=10;g.stroke();
+  for(const [q,t] of [[P[0],'A'],[P[P.length-1],'B']]){
+    g.beginPath();g.arc(q[0],q[1],17,0,Math.PI*2);g.fillStyle='#1565C0';g.fill();g.lineWidth=4;g.strokeStyle='#fff';g.stroke();
+    g.fillStyle='#fff';g.font='bold 20px sans-serif';g.textAlign='center';g.textBaseline='middle';g.fillText(t,q[0],q[1]+1);
+  }
+  label('ルートの端 A',P[0][0]+12,P[0][1]+52,{color:'#1565C0',size:20,align:'center'});
+  label('ルートの端 B',P[3][0],P[3][1]+52,{color:'#1565C0',size:20,align:'center'});
+  // 集合場所
+  const m=px(MEET);pin(m[0],m[1]);
+  label('📍 集合場所：ネットカフェの扉の前',m[0]-36,m[1]-128,{color:'#D7263D',size:24,align:'center'});
+  // 凡例
+  rr(20,20,480,128,10);g.fillStyle='rgba(255,255,255,0.95)';g.fill();g.lineWidth=1.5;g.strokeStyle='#999';g.stroke();
+  g.textAlign='left';g.textBaseline='middle';g.fillStyle='#1d2733';
+  g.font='bold 24px "Hiragino Sans","Yu Gothic","Meiryo",sans-serif';g.fillText('集合場所と実験ルート',38,48);
+  pin(52,100,0.42);g.font='19px "Hiragino Sans","Yu Gothic","Meiryo",sans-serif';g.fillStyle='#1d2733';g.fillText('集合場所（5分前にお集まりください）',80,88);
+  g.beginPath();g.moveTo(36,124);g.lineTo(68,124);g.strokeStyle='#1565C0';g.lineWidth=8;g.stroke();
+  g.fillText('実験で歩くルート（約60m、AとBの間を往復）',80,124);
+  // 方位と縮尺
+  g.save();g.translate(W-56,70);g.beginPath();g.moveTo(0,-30);g.lineTo(14,14);g.lineTo(0,6);g.lineTo(-14,14);g.closePath();g.fillStyle='#1d2733';g.fill();
+  g.font='bold 20px sans-serif';g.textAlign='center';g.fillText('N',0,-44);g.restore();
+  const mpp=156543.03*Math.cos(cLat*Math.PI/180)/Math.pow(2,Z)/SCALE, L=10/mpp;
+  rr(W-40-L-20,H-78,L+40,46,6);g.fillStyle='rgba(255,255,255,0.9)';g.fill();
+  g.beginPath();g.moveTo(W-40-L,H-46);g.lineTo(W-40-L,H-40);g.lineTo(W-40,H-40);g.lineTo(W-40,H-46);g.strokeStyle='#1d2733';g.lineWidth=3;g.stroke();
+  g.font='16px sans-serif';g.textAlign='center';g.fillStyle='#1d2733';g.fillText('10 m',W-40-L/2,H-60);
+  // 出典
+  g.font='14px sans-serif';const at=used.size?[...used].join(' / '):'© OpenStreetMap contributors';const aw=g.measureText(at).width;
+  g.fillStyle='rgba(255,255,255,0.85)';g.fillRect(0,H-24,aw+16,24);g.fillStyle='#333';g.textAlign='left';g.fillText(at,8,H-12);
+}
+if(location.protocol==='file:'){
+  document.getElementById('msg').innerHTML='<b style="color:#c00">パソコンのファイルを直接開くと地図が表示されません。GitHub Pagesにアップロードして、https:// のアドレスで開いてください。</b>';
+}
+loadTiles().then(r=>{
+  overlay();
+  if(location.protocol==='file:')return;
+  const ok=r.filter(Boolean).length;
+  document.getElementById('msg').textContent=ok===r.length?'地図を読み込みました。「画像として保存」を押すとPNGで保存できます。':
+    `地図の一部（${r.length-ok}/${r.length}枚）を読み込めませんでした。インターネット接続を確認して再読み込みしてください。`;
+});
+document.getElementById('save').onclick=()=>{
+  try{const a=document.createElement('a');a.download='meeting_route_map.png';a.href=cv.toDataURL('image/png');a.click();}
+  catch(e){document.getElementById('msg').textContent='保存できませんでした。画面のスクリーンショットをお使いください。';}
+};
+</script></body></html>
